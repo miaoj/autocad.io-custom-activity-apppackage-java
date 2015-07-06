@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://$PROJECT_DIR$/.idea/autocad.io-custom-activity-apppackage-java.iml" filepath="$PROJECT_DIR$/.idea/autocad.io-custom-activity-apppackage-java.iml" />
+      <module fileurl="file://$PROJECT_DIR$/simplest-library-java.iml" filepath="$PROJECT_DIR$/simplest-library-java.iml" />
+    </modules>
+  </component>
+</project>

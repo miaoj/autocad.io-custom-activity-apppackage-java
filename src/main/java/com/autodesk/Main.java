@@ -1,41 +1,31 @@
 package com.autodesk;
 
 import org.apache.commons.io.FileUtils;
-import org.apache.http.HttpResponse;
-import org.apache.http.NameValuePair;
+import org.apache.http.*;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.entity.UrlEncodedFormEntity;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.client.methods.HttpPost;
-import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.message.BasicNameValuePair;
 import org.apache.olingo.client.api.*;
 import org.apache.olingo.client.api.communication.request.cud.ODataEntityCreateRequest;
-import org.apache.olingo.client.api.communication.request.retrieve.EdmMetadataRequest;
+import org.apache.olingo.client.api.communication.request.cud.ODataEntityUpdateRequest;
+import org.apache.olingo.client.api.communication.request.cud.UpdateType;
+import org.apache.olingo.client.api.communication.request.invoke.ODataInvokeRequest;
 import org.apache.olingo.client.api.communication.request.retrieve.ODataEntityRequest;
-import org.apache.olingo.client.api.communication.request.retrieve.ODataServiceDocumentRequest;
-import org.apache.olingo.client.api.communication.response.ODataEntityCreateResponse;
-import org.apache.olingo.client.api.communication.response.ODataResponse;
-import org.apache.olingo.client.api.communication.response.ODataRetrieveResponse;
+import org.apache.olingo.client.api.communication.response.*;
 import org.apache.olingo.client.api.domain.*;
 import org.apache.olingo.client.core.*;
 import org.apache.olingo.commons.api.edm.*;
-import org.apache.olingo.commons.api.format.ODataFormat;
-import org.json.simple.JSONArray;
+import org.apache.olingo.commons.api.http.HttpMethod;
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 import org.json.simple.parser.ParseException;
 
 import java.io.*;
-import java.net.MalformedURLException;
-import java.net.URI;
-import java.net.URL;
-import java.net.URLConnection;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.Properties;
+import java.net.*;
+import java.util.*;
+
+import org.apache.http.client.methods.HttpPost;
 
 import static java.lang.System.*;
 /**
@@ -46,14 +36,20 @@ public class Main {
 
     public static void main(String[] args) throws IOException, ParseException, InterruptedException {
 
+        //get your ConsumerKey/ConsumerSecret at http://developer.autodesk.com
         final String token = getToken("you consumer key", "you consumer secret");
+
+        final String AppPackageName = "MyTestPackage";
+        final String ActivityName = "MyTestActivity";
 
         ODataClient client = ODataClientFactory.getClient();
         String serviceRoot = "https://developer.api.autodesk.com/autocad.io/us-east/v2/";
 
-        ClientEntity act = getActivity(client, serviceRoot, token);
+        createOrUpdatePackage("your auto-loadable zip file path", AppPackageName, client, serviceRoot, token);
 
-        createNewWorkItem(client, serviceRoot, token);
+        createActivityIfNotExisted(ActivityName, AppPackageName, client, serviceRoot, token);
+
+        createNewWorkItem(ActivityName, client, serviceRoot, token);
     }
 
     //obtain authorization token
@@ -81,50 +77,198 @@ public class Main {
         return (String)jsonObj.get("token_type") + " " + (String)jsonObj.get("access_token");
     }
 
-    static ClientEntity getActivity(final ODataClient client, final String serviceRoot, final String token)
-    {
-        // try get Activity
-        URI uri = client.newURIBuilder(serviceRoot)
-                .appendEntitySetSegment("Activities")
-                .appendKeySegment("PlotToPDF").build();
+    static void createOrUpdatePackage(final String filepath, final String appPackageName, final ODataClient client, final String serviceRoot, final String token) throws IOException {
 
-        ODataEntityRequest<ClientEntity> entityRequest = client.getRetrieveRequestFactory().getEntityRequest(uri);
+        out.println("Creating/Updating AppPackage...");
+        // First step -- query for the url to upload the AppPackage file
+        URI uploadUri = client.newURIBuilder(serviceRoot)
+                .appendEntitySetSegment("AppPackages")
+                .appendPropertySegment("Operations.GetUploadUrl").build();
+
+        ODataInvokeRequest<ClientProperty> uploadUrlRequest = client.getInvokeRequestFactory().getFunctionInvokeRequest(uploadUri, ClientProperty.class);
+        uploadUrlRequest.addCustomHeader("Authorization", token);
+        ODataInvokeResponse<ClientProperty> urlResponse = uploadUrlRequest.execute();
+        String resourceUri = urlResponse.getBody().getValue().toString();
+
+        // upload package
+        UploadObject(resourceUri, filepath);
+
+        // create or update AppPackage -- first check if it exists
+        URI appUri = client.newURIBuilder(serviceRoot)
+                .appendEntitySetSegment("AppPackages")
+                .appendKeySegment(appPackageName).build();
+        ODataEntityRequest<ClientEntity> entityRequest = client.getRetrieveRequestFactory().getEntityRequest(appUri);
         entityRequest.addCustomHeader("Authorization", token);
-        ODataRetrieveResponse<ClientEntity> response = entityRequest.execute();
-        ClientEntity activity = response.getBody();
+        ODataRetrieveResponse<ClientEntity> response = null;
+        try {
+            response = entityRequest.execute();
+        } catch (Exception e) {};
 
-        return activity;
+        // create a new AppPackage
+        ClientEntity appPackage = client.getObjectFactory().newEntity(new FullQualifiedName("ACES.Models", "AppPackage"));
+        if (response == null) // create it
+        {
+            // set ID to ""
+            appPackage.getProperties().add(client.getObjectFactory().newPrimitiveProperty(
+                    "Id", client.getObjectFactory().newPrimitiveValueBuilder().buildString(appPackageName)));
+            // set RequiredEngineVersion to "20.1"
+            appPackage.getProperties().add(client.getObjectFactory().newPrimitiveProperty(
+                    "RequiredEngineVersion", client.getObjectFactory().newPrimitiveValueBuilder().buildString("20.1")));
+            appPackage.getProperties().add(client.getObjectFactory().newPrimitiveProperty(
+                    "Resource", client.getObjectFactory().newPrimitiveValueBuilder().buildString(resourceUri)));
+
+            // submit the request
+            URI uri = client.newURIBuilder(serviceRoot).appendEntitySetSegment("AppPackages").build();
+            ODataEntityCreateRequest<ClientEntity> req = client.getCUDRequestFactory().getEntityCreateRequest(uri, appPackage);
+            req.addCustomHeader("Authorization", token);
+            ODataEntityCreateResponse<ClientEntity> res = req.execute();
+            out.println("Returned response code for Creating AppPackage: " + res.getStatusCode());
+        } else { // update it
+            appPackage.getProperties().add(client.getObjectFactory().newPrimitiveProperty(
+                    "Resource", client.getObjectFactory().newPrimitiveValueBuilder().buildString(resourceUri)));
+
+            // submit the request
+            URI uri = client.newURIBuilder(serviceRoot).appendEntitySetSegment("AppPackages").appendKeySegment(appPackageName).build();
+            ODataEntityUpdateRequest<ClientEntity> req = client.getCUDRequestFactory().getEntityUpdateRequest(uri, UpdateType.PATCH, appPackage);
+            req.addCustomHeader("Authorization", token);
+            ODataEntityUpdateResponse<ClientEntity> res = req.execute();
+            out.println("Returned response code for Updating AppPackage: " + res.getStatusCode());
+        }
     }
 
-    static void createNewWorkItem(final ODataClient client, final String serviceRoot, final String token) throws InterruptedException, IOException, ParseException {
+    public static void UploadObject(String uploadUrl, String fileName) throws IOException
+    {
+        URL url = new URL(uploadUrl);
+        HttpURLConnection connection=(HttpURLConnection) url.openConnection();
+        connection.setDoOutput(true);
+        connection.setRequestMethod("PUT");
+        OutputStream os = connection.getOutputStream();
+
+        byte[] buffer = new byte[8000];
+        File file = new File(fileName);
+        InputStream is = new FileInputStream(file);
+        int length = 0;
+        while((length=is.read(buffer))>0)
+        {
+            os.write(buffer, 0, length);
+        }
+        os.close();
+
+        int responseCode = connection.getResponseCode();
+        out.println("Returned response code for uploading file: " + responseCode);
+    }
+
+    static void createActivityIfNotExisted(final String activityName, final String appPackName, final ODataClient client, final String serviceRoot, final String token)
+    {
+        URI actUri = client.newURIBuilder(serviceRoot)
+                .appendEntitySetSegment("Activities")
+                .appendKeySegment(activityName).build();
+        ODataEntityRequest<ClientEntity> entityRequest = client.getRetrieveRequestFactory().getEntityRequest(actUri);
+        entityRequest.addCustomHeader("Authorization", token);
+
+        ODataRetrieveResponse<ClientEntity> response = null;
+        try { response = entityRequest.execute(); } catch(Exception e){};
+        if(response == null)
+        {
+            out.println("Creating Activity...");
+            ClientEntity activity = client.getObjectFactory().newEntity(new FullQualifiedName("ACES.Models", "Activity"));
+            // set ID to ""
+            activity.getProperties().add(client.getObjectFactory().newPrimitiveProperty(
+                    "Id", client.getObjectFactory().newPrimitiveValueBuilder().buildString(activityName)));
+            // set RequiredEngineVersion to "20.1"
+            activity.getProperties().add(client.getObjectFactory().newPrimitiveProperty(
+                    "RequiredEngineVersion", client.getObjectFactory().newPrimitiveValueBuilder().buildString("20.1")));
+            // set Instruction
+            ClientComplexValue instruction = client.getObjectFactory().newComplexValue("ACES.Models.Instruction");
+            instruction.add(client.getObjectFactory().newPrimitiveProperty("Script",
+                    client.getObjectFactory().newPrimitiveValueBuilder().buildString("_test params.json outputs\n")));
+            activity.getProperties().add(client.getObjectFactory().newComplexProperty(
+                    "Instruction", instruction));
+
+            // set Parameters
+            ClientComplexValue inputParam1 = client.getObjectFactory().newComplexValue("ACES.Models.Parameter");
+            inputParam1.add(client.getObjectFactory().newPrimitiveProperty(
+                    "Name", client.getObjectFactory().newPrimitiveValueBuilder().buildString("HostDwg")));
+            inputParam1.add(client.getObjectFactory().newPrimitiveProperty(
+                    "LocalFileName", client.getObjectFactory().newPrimitiveValueBuilder().buildString("$(HostDwg)")));
+            ClientComplexValue inputParam2 = client.getObjectFactory().newComplexValue("ACES.Models.Parameter");
+            inputParam2.add(client.getObjectFactory().newPrimitiveProperty(
+                    "Name", client.getObjectFactory().newPrimitiveValueBuilder().buildString("Params")));
+            inputParam2.add(client.getObjectFactory().newPrimitiveProperty(
+                    "LocalFileName", client.getObjectFactory().newPrimitiveValueBuilder().buildString("params.json")));
+            ClientCollectionValue<ClientValue> inputParamCollection = client.getObjectFactory().newCollectionValue("ACES.Models.Parameter");
+            inputParamCollection.add(inputParam1);
+            inputParamCollection.add(inputParam2);
+
+            ClientComplexValue outputParam1 = client.getObjectFactory().newComplexValue("ACES.Models.Parameter");
+            outputParam1.add(client.getObjectFactory().newPrimitiveProperty(
+                    "Name", client.getObjectFactory().newPrimitiveValueBuilder().buildString("Results")));
+            outputParam1.add(client.getObjectFactory().newPrimitiveProperty(
+                    "LocalFileName", client.getObjectFactory().newPrimitiveValueBuilder().buildString("outputs")));
+            ClientCollectionValue<ClientValue> outputParamCollection = client.getObjectFactory().newCollectionValue("ACES.Models.Parameter");
+            outputParamCollection.add(outputParam1);
+
+            ClientComplexValue parametersCollection = client.getObjectFactory().newComplexValue("ACES.Models.Parameters");
+            parametersCollection.add(client.getObjectFactory().newCollectionProperty(
+                    "InputParameters", inputParamCollection));
+            parametersCollection.add(client.getObjectFactory().newCollectionProperty(
+                    "OutputParameters", outputParamCollection));
+            activity.getProperties().add(client.getObjectFactory().newComplexProperty("Parameters", parametersCollection));
+
+            // set AppPackages
+            ClientCollectionValue appPackages = client.getObjectFactory().newCollectionValue("String");
+            appPackages.add(client.getObjectFactory().newPrimitiveValueBuilder().buildString(appPackName));
+            activity.getProperties().add(client.getObjectFactory().newCollectionProperty("AppPackages", appPackages));
+
+            // submit the request
+            URI uri = client.newURIBuilder(serviceRoot).appendEntitySetSegment("Activities").build();
+            ODataEntityCreateRequest<ClientEntity> req = client.getCUDRequestFactory().getEntityCreateRequest(uri, activity);
+            req.addCustomHeader("Authorization", token);
+            ODataEntityCreateResponse<ClientEntity> res = req.execute();
+            out.println("Returned response code for Creating Activity: " + res.getStatusCode());
+        }
+    }
+
+    static void createNewWorkItem(final String activityId, final ODataClient client, final String serviceRoot, final String token) throws InterruptedException, IOException, ParseException {
         // create a new WorkItem
         ClientEntity ent = client.getObjectFactory().newEntity(new FullQualifiedName("ACES.Models", "WorkItem"));
         // set ID to ""
         ent.getProperties().add(client.getObjectFactory().newPrimitiveProperty(
                 "Id", client.getObjectFactory().newPrimitiveValueBuilder().buildString("")));
 
-        // set ActivityId to "PlotToPDF"
+        // set ActivityId
         ent.getProperties().add(client.getObjectFactory().newPrimitiveProperty(
-                "ActivityId", client.getObjectFactory().newPrimitiveValueBuilder().buildString("PlotToPDF")));
+                "ActivityId", client.getObjectFactory().newPrimitiveValueBuilder().buildString(activityId)));
 
         // Set Arguments
-        ClientComplexValue inputArgument = client.getObjectFactory().newComplexValue("ACES.Models.Argument");
-        inputArgument.add(client.getObjectFactory().newPrimitiveProperty("Name",
+        ClientComplexValue inputArgument1 = client.getObjectFactory().newComplexValue("ACES.Models.Argument");
+        inputArgument1.add(client.getObjectFactory().newPrimitiveProperty("Name",
                 client.getObjectFactory().newPrimitiveValueBuilder().buildString("HostDwg")));
-        inputArgument.add(client.getObjectFactory().newPrimitiveProperty("Resource",
+        inputArgument1.add(client.getObjectFactory().newPrimitiveProperty("Resource",
                 client.getObjectFactory().newPrimitiveValueBuilder().buildString("http://download.autodesk.com/us/samplefiles/acad/blocks_and_tables_-_imperial.dwg")));
-        inputArgument.add(client.getObjectFactory().newEnumProperty("StorageProvider", client.getObjectFactory().newEnumValue("ACES.Models.StorageProvider", "Generic")));
+        inputArgument1.add(client.getObjectFactory().newEnumProperty("StorageProvider", client.getObjectFactory().newEnumValue("ACES.Models.StorageProvider", "Generic")));
+
+        ClientComplexValue inputArgument2 = client.getObjectFactory().newComplexValue("ACES.Models.Argument");
+        inputArgument2.add(client.getObjectFactory().newEnumProperty("ResourceKind",
+                client.getObjectFactory().newEnumValue("ACES.Models.ResourceKind", "Embedded")));
+        inputArgument2.add(client.getObjectFactory().newPrimitiveProperty("Name",
+                client.getObjectFactory().newPrimitiveValueBuilder().buildString("Params")));
+        inputArgument2.add(client.getObjectFactory().newPrimitiveProperty("Resource",
+                client.getObjectFactory().newPrimitiveValueBuilder().buildString("data:application/json, {\"ExtractBlockNames\":true,\"ExtractLayerNames\":true}")));
+        inputArgument2.add(client.getObjectFactory().newEnumProperty("StorageProvider", client.getObjectFactory().newEnumValue("ACES.Models.StorageProvider", "Generic")));
 
         ClientComplexValue outputArgument = client.getObjectFactory().newComplexValue("ACES.Models.Argument");
         outputArgument.add(client.getObjectFactory().newPrimitiveProperty("Name",
-                client.getObjectFactory().newPrimitiveValueBuilder().buildString("Result")));
+                client.getObjectFactory().newPrimitiveValueBuilder().buildString("Results")));
         outputArgument.add(client.getObjectFactory().newPrimitiveProperty("Resource",
                 client.getObjectFactory().newPrimitiveValueBuilder().buildString("")));
         outputArgument.add(client.getObjectFactory().newEnumProperty("StorageProvider", client.getObjectFactory().newEnumValue("ACES.Models.StorageProvider", "Generic")));
-        outputArgument.add(client.getObjectFactory().newEnumProperty("HttpVerb", client.getObjectFactory().newEnumValue("ACES.Models.HttpVerbType","POST")));
+        outputArgument.add(client.getObjectFactory().newEnumProperty("HttpVerb", client.getObjectFactory().newEnumValue("ACES.Models.HttpVerbType", "POST")));
+        outputArgument.add(client.getObjectFactory().newEnumProperty("ResourceKind", client.getObjectFactory().newEnumValue("ACES.Models.ResourceKind", "ZipPackage")));
 
         ClientCollectionValue<ClientValue> inputArgCollection = client.getObjectFactory().newCollectionValue("ACES.Models.Argument");
-        inputArgCollection.add(inputArgument);
+        inputArgCollection.add(inputArgument1);
+        inputArgCollection.add(inputArgument2);
         ClientCollectionValue<ClientValue> outputArgCollection = client.getObjectFactory().newCollectionValue("ACES.Models.Argument");
         outputArgCollection.add(outputArgument);
         ClientComplexValue arguments = client.getObjectFactory().newComplexValue("ACES.Models.Arguments");
@@ -139,8 +283,7 @@ public class Main {
         req.addCustomHeader("Authorization", token);
         ODataEntityCreateResponse<ClientEntity> res = req.execute();
 
-        if(res.getStatusCode() == 201)
-        {
+        if (res.getStatusCode() == 201) {
             ClientEntity workItem = res.getBody();
             String id = workItem.getProperty("Id").getValue().asPrimitive().toString();
             String status;
@@ -151,8 +294,8 @@ public class Main {
                 workItem = pollWorkItem(client, serviceRoot, token, id);
                 status = workItem.getProperty("Status").getValue().asEnum().getValue();
                 out.println(status);
-            } while (status.compareTo("Pending")==0 || status.compareTo("InProgress")==0);
-            if (status.compareTo("Succeeded")==0)
+            } while (status.compareTo("Pending") == 0 || status.compareTo("InProgress") == 0);
+            if (status.compareTo("Succeeded") == 0)
                 downloadResults(workItem);
         }
     }
@@ -190,4 +333,5 @@ public class Main {
         // download execution report
         FileUtils.copyURLToFile(new URL(reportUrl), new File("d:/report.txt"));
     }
+
 }

@@ -50,6 +50,8 @@ public class Main {
         createActivityIfNotExisted(ActivityName, AppPackageName, client, serviceRoot, token);
 
         createNewWorkItem(ActivityName, client, serviceRoot, token);
+
+        demoVersionControl(AppPackageName, client, serviceRoot, token);
     }
 
     //obtain authorization token
@@ -332,6 +334,54 @@ public class Main {
         final String reportUrl = wi.getProperty("StatusDetails").getComplexValue().get("Report").getValue().asPrimitive().toString();
         // download execution report
         FileUtils.copyURLToFile(new URL(reportUrl), new File("d:/report.txt"));
+    }
+
+    static void demoVersionControl(final String appPackName, final ODataClient client, final String serviceRoot, final String token)
+    {
+        // We have version control over submitted AppPackages/Activities.
+        out.println("We have version control over submitted AppPackages/Activities. Here is the version history of AppPackage with name: " + appPackName);
+
+        URI getVersionsUri = client.newURIBuilder(serviceRoot)
+                .appendEntitySetSegment("AppPackages")
+                .appendKeySegment(appPackName)
+                .appendPropertySegment("Operations.GetVersions").build();
+
+        ODataInvokeRequest<ClientProperty> getVersionsRequest = client.getInvokeRequestFactory().getFunctionInvokeRequest(getVersionsUri, ClientProperty.class);
+        getVersionsRequest.addCustomHeader("Authorization", token);
+        ODataInvokeResponse<ClientProperty> getVersionsResponse = getVersionsRequest.execute();
+        ClientCollectionValue<ClientValue> versionedAppPackages = getVersionsResponse.getBody().getCollectionValue();
+        List<Integer> verList = new ArrayList<Integer>();
+        for(ClientValue cv : versionedAppPackages)
+        {
+            ClientComplexValue appPackage = cv.asComplex();
+            int ver = (Integer) ( appPackage.get("Version").getPrimitiveValue().toValue());
+            String time = appPackage.get("Timestamp").getPrimitiveValue().toString();
+            out.println("Version #: "+ ver + ".  Time Submitted: " + time);
+            verList.add(ver);
+        }
+        Collections.sort(verList);
+        Integer smallestVer = verList.get(0);
+
+        try {
+            URI setVersionUri = client.newURIBuilder(serviceRoot)
+                    .appendEntitySetSegment("AppPackages")
+                    .appendKeySegment(appPackName)
+                    .appendPropertySegment("Operations.SetVersion")
+                    .build();
+            ODataInvokeRequest<ClientProperty> setVersionRequest = client.getInvokeRequestFactory().getActionInvokeRequest(setVersionUri, ClientProperty.class);
+            Map<String, ClientValue> content = new HashMap<String, ClientValue>();
+            content.put("Version", client.getObjectFactory().newPrimitiveValueBuilder().buildString(smallestVer.toString()));
+            setVersionRequest.setParameters(content);
+            HttpMethod p = setVersionRequest.getMethod();
+            setVersionRequest.addCustomHeader("Authorization", token);
+            ODataInvokeResponse serVersionResponse = setVersionRequest.execute();
+            out.println(serVersionResponse.getStatusCode());
+        }
+        catch(Exception e )
+        {
+            out.println(e.getMessage());
+            out.println(e.getCause().getMessage());
+        }
     }
 
 }
